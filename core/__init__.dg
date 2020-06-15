@@ -55,9 +55,9 @@ save = code tag dirname ->
 
 _repr = x -> if
   x :: types.CodeType =>
-    fields  = ['argcount', 'kwonlyargcount', 'nlocals', 'stacksize', 'flags', 'code', 'consts', 'names']
+    fields  = ['argcount', 'posonlyargcount', 'kwonlyargcount', 'nlocals', 'stacksize', 'flags', 'code', 'consts', 'names']
     fields += ['varnames', 'filename', 'name', 'firstlineno', 'lnotab', 'freevars', 'cellvars']
-    'C({})'.format $ ','.join $ map (f -> _repr $ getattr x $ 'co_' + f) fields
+    'C({})'.format $ ','.join $ map (f -> _repr $ getattr x $ 'co_' + f) $ filter (f -> hasattr x $ 'co_' + f) fields
   x :: list  => '[{}]'.format $ ''.join $ map (i -> _repr i + ',') x
   x :: tuple => '({})'.format $ ''.join $ map (i -> _repr i + ',') x
   otherwise => repr x

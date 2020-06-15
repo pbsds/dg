@@ -17,7 +17,8 @@ opcode.opmap.setdefault 'BUILD_TUPLE_UNPACK'         152
 opcode.opmap.setdefault 'BUILD_SET_UNPACK'           153
 opcode.opmap.setdefault 'BUILD_CONST_KEY_MAP'        156
 
-_PY_FEATURE_WORDCODE = (PY_VERSION >= 0x030600a3)
+_PY_FEATURE_WORDCODE      = (PY_VERSION >= 0x030600a3)
+_PY_FEATURE_POS_ONLY_ARGS = hasattr types.CodeType 'co_posonlyargcount' # depends on running version, not target
 
 
 #: Calculate the length of a bytecode sequence given (opcode, argument) pairs, in bytes.
@@ -243,7 +244,11 @@ CodeType = subclass object where
       code = @optimize code consts names @lnotab
       code = @optimize code consts names @lnotab
 
-    types.CodeType @argc @kwargc (len varnames) @stacksize @flags code (tuple consts) names
+    poargc = if
+      _PY_FEATURE_POS_ONLY_ARGS => [0] # pos-args only are not supported by dg syntax (yet)
+      otherwise                 => []
+
+    types.CodeType @argc *:poargc @kwargc (len varnames) @stacksize @flags code (tuple consts) names
       varnames
       @filename
       @name

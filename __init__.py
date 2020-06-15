@@ -17,9 +17,18 @@ def load():
             for code in load(fd):
                 eval(code)
     except FileNotFoundError:
+        def CodeTypeShim(*args):
+            if hasattr(types.CodeType, 'co_posonlyargcount'):
+                if len(args) == 15:  # posonlyargcount is missing (came from eariler version)
+                    args = (args[0], 0, *args[1:])  # insert a posonlyargcount=0
+            else:
+                if len(args) == 15:  # posonlyargcount is present (came from later version)
+                    args = (args[0], *args[2:])  # remove it
+            return types.CodeType(*args)
+
         try:
             with open(os.path.join(BUNDLE_DIR, PY_TAG + '.dgbundle.py')) as fd:
-                for code in eval(fd.read(), {'C': types.CodeType}):
+                for code in eval(fd.read(), {'C': CodeTypeShim}):
                     eval(code)
         except FileNotFoundError:
             raise ImportError('python implementation {!r} not supported'.format(PY_TAG))
