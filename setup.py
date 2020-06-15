@@ -9,6 +9,6 @@ setup(
     author_email='pyos100500@gmail.com',
     url='https://github.com/pyos/dg.git',
     packages=['dg'],
-    package_dir={'dg': '.'},
+    package_dir={'dg': './dg'},
     package_data={'dg': ['*.dg', '*/*.dg', '*/*.dgbundle']}
 )
