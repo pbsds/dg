@@ -1,0 +1,22 @@
+x = (a, b) -> (a, head $ (str b).split " at 0x")
+y = (a, b) -> not $ (str a).startswith "_"
+
+print (a = 1)
+print (b = 2)
+
+foo = ->
+  print (a = 3)
+  print (b := 4)
+  print (c = 5)
+  bar = ->
+    print (a = 6)
+    print (b := 7)
+    print (c = 8)
+    print (d := 9)
+    print 10 sep:'\n' *: (sorted$ map x $ filter y locals!.items!)
+  print 11   sep:'\n' *: (sorted$ map x $ filter y locals!.items!)
+  bar!
+  print 12   sep:'\n' *: (sorted$ map x $ filter y locals!.items!)
+print 13     sep:'\n' *: (sorted$ map x $ filter y locals!.items!)
+foo!
+print 14     sep:'\n' *: (sorted$ map x $ filter y locals!.items!)

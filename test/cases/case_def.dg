@@ -1,0 +1,40 @@
+import '/inspect/signature'
+arun = (import '/asyncio/' pure).get_event_loop!.run_until_complete
+print sep: '\n' *:
+  map signature $ list'
+    a b c -> print 1
+    a b c ->
+      print 2
+      print 3
+      print 4
+      print 5
+    *: foo bar baz:2 -> print 6
+    foo bar:1 baz:2 -> print 7
+    foo *:bar **:baz -> print 8
+    -> print 9
+    ->> print 10
+    async$ -> print 11
+    a -> print 12
+    a ->> print 13
+    async$ a -> print 14
+    a ~> print 15
+    a ~>> print 16
+    async$ a ~> print 17
+
+(-> print 18)!
+
+print$ type$ ~> print 19
+print$ type$ ~>> print 20
+print$ type$ async$ ~> print 21
+print$       ( a ->           ) 'hello'
+print$       ( a -> 23        ) 'hello'
+print$       ( a ~>           ) 'hello' 'world'
+print$       ( a ~> 24        ) 'hello' 'world'
+print$ arun$ ( a ->>          ) 'hello'
+print$ arun$ ( a ->> 25       ) 'hello'
+print$ arun$ ( a ~>>          ) 'hello' 'world'
+print$ arun$ ( a ~>> 26       ) 'hello' 'world'
+print$ arun$ ( async$ a ->    ) 'hello'
+print$ arun$ ( async$ a -> 27 ) 'hello'
+print$ arun$ ( async$ a ~>    ) 'hello' 'world'
+print$ arun$ ( async$ a ~> 28 ) 'hello' 'world'

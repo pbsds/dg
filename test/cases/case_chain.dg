@@ -1,0 +1,22 @@
+print 1
+  (print 2 or "A") in (print 3 or "AA") in (print 4 or "AA")
+
+foo = ->
+  print 5
+    (print 6 or 7) < (print 8 or 9) < (print 10 or 11)
+  print 12
+    (print 13 or 14) > (print 15 or 16) > (print 17 or 18)
+    (print 13 or 14) > (print 15 or 16) < (print 17 or 18)
+
+bar = ->
+  < = (import '/operator').lt
+  > = (import '/operator').gt
+
+  print 19
+    (print 20 or 21) < (print 22 or 23) < (print 24 or 25)
+  print 26
+    (print 27 or 28) > (print 29 or 30) > (print 31 or 32)
+    (print 27 or 28) > (print 29 or 30) < (print 31 or 32)
+
+foo!
+bar!

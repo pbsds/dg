@@ -1,0 +1,4 @@
+print 1 sep:'\n2\t' *: (sorted$ globals!.keys!)
+print 3 sep:'\n3\t' *: (sorted$ locals!.keys!)
+print 4 sep:'\n5\t' *: (sorted$ __builtins__.keys!)
+print 6 sep:'\n7\t' *: (sorted$ (import '/builtins' pure).__dict__.keys!)

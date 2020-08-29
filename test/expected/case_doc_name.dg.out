@@ -1,0 +1,13 @@
+7 'foo' - '\n 2  3\n     4'
+19 'bar' - '\n 8\n 10 11\n     12'
+20	'baz' - '\n 8\n 10 11\n     12'
+20	'bar' - '\n 16'
+20	'bar' - None
+22 'foobar' - '\n 21'
+23	'foobar' - '\n 21'
+23	'foobar' - '\n 25'
+23	'foobar' - '\n 26'
+23	'foobar' - None
+28 'a' - '\n 27'
+29	'b' - None
+29	'c' - None

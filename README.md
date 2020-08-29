@@ -21,6 +21,13 @@ python -m dg <<< 'print "Hello, World!"'
 echo 'print "Hello, World!"' > dg_module.dg; python -c 'import dg, dg_module'
 ```
 
+### Running tests
+
+```sh
+python -m pytest                # Compare against expected behaviour
+python -m pytest --set-expected # Writes the new expected behaviour
+```
+
 ### More complex stuff
 
 [http://pyos.github.io/dg/](http://pyos.github.io/dg/)

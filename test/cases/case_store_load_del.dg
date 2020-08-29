@@ -1,0 +1,32 @@
+ASD = 1
+obj = Obj! where Obj = subclass object where
+  __getattr__ = key ~>
+    print 'get' key
+    ASD
+  __setattr__ = key val ~>
+    print 'set' key val
+    ASD
+  __delattr__ = key ~>
+    print 'del' key
+    ASD
+  __getitem__ = __getattr__
+  __setitem__ = __setattr__
+  __delitem__ = __delattr__
+
+print sep:'\t' ASD
+  obj.foo = obj.bar
+  obj.foo, obj.bar = obj.bar, obj.foo
+  obj.~foo
+#  obj.~foo = ASD
+  obj !! ASD = ASD
+  obj !!~ ASD
+#  obj !!~ ASD = ASD
+  obj !! ASD = obj !! ASD
+  obj !! ASD, obj !! ASD = obj !! ASD, obj !! ASD
+  obj !!= ASD
+  obj
+
+
+@ = 1
+#except err         => @@ = 1
+#  err :: Exception => print err

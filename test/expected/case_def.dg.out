@@ -1,0 +1,30 @@
+(a, b, c)
+(a, b, c)
+(*foo, bar, baz=2)
+(foo, bar=1, baz=2)
+(foo, *bar, **baz)
+()
+()
+()
+(a)
+(a)
+(a)
+(self, a)
+(self, a)
+(self, a)
+18
+<class 'property'>
+<class 'property'>
+<class 'property'>
+None
+23
+None
+24
+None
+25
+None
+26
+None
+27
+None
+28

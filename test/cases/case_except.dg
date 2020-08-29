@@ -1,0 +1,41 @@
+print 2 $ except
+  err                      => 5/0
+  print 3                  => print 4 or 5
+  err :: TypeError         => print 6 or 7
+  print 8                  => print 9 or 10
+  ZeroDivisionError        => print 11 or 12
+  err :: ZeroDivisionError => print 13 or 14
+  finally                  => print 15 or 16
+
+print 17 $ except
+  err                      => print 18 or 19
+  print 20                 => print 21 or 22
+  err :: TypeError         => print 23 or 24
+  print 25                 => print 26 or 27
+  ZeroDivisionError        => print 28 or 29
+  err :: ZeroDivisionError => print 30 or 31
+  finally                  => print 32 or 33
+
+finally = False
+
+print 34 $ except
+  err                      => 5/0
+  err :: ZeroDivisionError => print 35 or 36
+  finally                  => print 37 or 38
+
+print 39 $ except
+  err                      => 5/0
+  finally                  => print 40 or 41
+  err :: ZeroDivisionError => print 42 or 43
+
+print 44
+  except
+    err2 =>
+      print 45 $ except
+        err       => print 46 or 47
+        otherwise => print 48 or 49
+    err2 :: Exception => print (type err2) err2
+
+print 50 $ except
+  err       => 5/0
+  otherwise => print 51 or 52

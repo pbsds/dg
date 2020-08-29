@@ -1,0 +1,17 @@
+print$ a, b, c where
+  print (a = 2)
+  print (b = 3)
+  print (c = 4)
+
+print$ a, b, c where
+  print (a = 5)
+  print (b = 6)
+  print (c = 7)
+  return (8, 9, 10)
+
+a = print 11 $ where print 12 or 12
+b = print 13
+  where print 14 or 14
+
+print$ head$ (str a).split " 0x"
+print$ head$ (str b).split " 0x"

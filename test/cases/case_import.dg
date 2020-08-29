@@ -1,0 +1,8 @@
+print sep:'\n'
+  import '/doesnotexist/../../sys'
+  import '/os' == os
+  import '/posixpath' pure
+  import '/os/path'
+  import '/os/path' qualified
+  import '/xml/etree/ElementTree' qualified pure
+  *: (sorted$ locals!.keys!)

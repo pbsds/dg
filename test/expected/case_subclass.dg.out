@@ -1,0 +1,16 @@
+2
+3
+1 <class '__main__.<where>'>
+5
+6
+4 <class '__main__.Foo'>
+9
+10
+8 <class '__main__.Bar'>
+12
+13
+Baz (<class '__main__.Bar'>,) {'a': 12, 'b': 13, '__doc__': None, '__module__': '__main__', '__qualname__': 'Baz'}
+11 None
+7
+0
+True

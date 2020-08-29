@@ -1,0 +1,33 @@
+1
+2
+13
+('a', '1')
+('b', '2')
+('foo', '<function foo')
+('x', '<function x')
+('y', '<function y')
+3
+4
+5
+11
+('a', '3')
+('bar', '<function foo.bar')
+('c', '5')
+6
+7
+8
+9
+10
+('a', '6')
+('c', '8')
+12
+('a', '3')
+('bar', '<function foo.bar')
+('c', '5')
+14
+('a', '1')
+('b', '7')
+('d', '9')
+('foo', '<function foo')
+('x', '<function x')
+('y', '<function y')

@@ -1,0 +1,53 @@
+# output formatter:
+f = foldl1 (<-) $ list'
+  " - ".join
+  bind map repr
+  (import '/operator/attrgetter' pure) '__name__' '__doc__' # should be a dg builtin
+
+
+# 1
+#: 2  3
+#:     4
+# 5
+foo = a b c -> print 6
+print 7 $ f foo
+
+#: 8
+
+# 9
+#: 10 11
+#:     12
+# 13
+#:
+foo = bar = list'
+  a b c -> print 14
+  baz = a b c -> print 15
+  #: 16
+  a b c -> print 17
+  a b c -> print 18
+print 19 $ '\n20\t'.join $ map f foo
+
+
+#: 21
+foobar = print 22 $ '\n23\t'.join $ map f $ list'
+  subclass object where
+    #: 24
+    None
+  subclass object where
+    None
+    #: 25
+  subclass object where
+    None
+  #: 26
+  subclass object where
+    None
+  subclass object where
+    None
+
+#: 27
+a = subclass object where
+  b = subclass object where
+    None
+  c = subclass object where
+    None
+print 28 $ '\n29\t'.join $ map f [a, a.b, a.c]
