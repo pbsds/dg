@@ -1,0 +1,124 @@
+import '/ast'
+import '/collections/abc/Iterable'
+
+# Result (inspired by Hylang) simplifies compilation to dogelang, where everything can be used
+# as an expression. In Python, statements and expressions don't mesh well.
+# Results is simply a list of statements (stmts), terminated by an expression (expr)
+Result = subclass object where
+  __init__ = expr:None stmts:[] ~> None where
+    stmts :: Iterable                   or raise TypeError
+    stmts = list stmts
+    map (x->x :: ast.stmt) stmts |> all or raise TypeError
+    expr => expr :: ast.expr            or raise TypeError
+
+    @_expr      = expr
+    @_expr_used = False
+    @_expr_pure = False # True means dropping the expr has no side effects
+    @stmts      = stmts
+
+  is_empty = ~> bool
+    not @_expr and not @stmts
+
+  is_only_stmts = ~> bool
+    @is_expr_pure and @stmts
+
+  is_only_expr = ~> bool
+    @_expr and not @stmts
+
+  is_expr_pure = ~> any$ tuple'
+    not @has_expr
+    @_expr_pure
+    @_expr :: ast.Name
+    @_expr :: ast.NameConstant # TODO. ast.Constant
+
+  has_expr = ~> bool
+    @_expr
+
+  # Returns a shallow copy of self.
+  # Is not a property.
+  copy = self -> Result expr: @_expr stmts: @stmts
+
+  #: returns self with result of the trailing expression
+  #: converted to a stmt, discarding its value.
+  #: Always makes a copy.
+  only_stmts = ~> Result stmts: @stmts
+
+  #: Gets the current expression
+  expr = ~> if
+    @_expr =>
+      @_expr_used = True
+      @_expr
+    @stmts =>
+      asty.NameConstant (last @stmts) None
+    otherwise =>
+      raise AssertionError 'Tried Result(expr=None, stmts=[]).expr'
+
+  #: get_expr :: Result -> ast.expr
+  get_expr = staticmethod$ self -> @expr
+
+  #: Ensures there is no tailing expr
+  #: with_expr_as_stmt :: ~> Result
+  with_expr_as_stmt = ~> if
+    @is_expr_pure =>
+      @only_stmts
+    otherwise =>
+      expr = @expr
+      self + (asty.Expr expr expr)
+
+  #: Chain Result through addition: adding two results together returns a
+  #: Result representing the succession of the two Resexpressionults' statements, with
+  #: the expression context of the second Result.
+  #: Subject to copy elision.
+  __add__ = rhs ~> if
+    #not @_expr_used and not @is_expr_pure =>
+    #  raise AssertionError 'Result.expr was clobbered'
+    # TODO: enable ^
+
+    rhs :: ast.expr => Result stmts: @stmts expr: rhs
+    rhs :: ast.stmt => Result stmts: (@stmts +: rhs)
+    rhs :: Result   => if
+      @is_empty                   => rhs
+      rhs.is_empty and not @_expr => self
+      rhs.is_empty                => @only_stmts
+      otherwise                   => Result expr: rhs._expr stmts:
+                                      list$ chain @stmts rhs.stmts
+    rhs :: Iterable => foldl (+) self rhs
+    otherwise       => raise TypeError$ (type rhs, rhs)
+
+  #: Marks the current trailing expr as pure.
+  #: Not a property.
+  set_expr_pure = self -> self where
+    @_expr_pure = True
+
+  __repr__ = self ->
+    "Result(expr={}, stmts={}, expr_pure={})".format
+      repr$ @_expr and ast.dump @_expr
+      repr$ @stmts
+      repr$ @is_expr_pure
+
+# python ast helper
+asty = Obj! where Obj = subclass object where
+  __getattr__ = key ~>
+    wrapper = AST loc_src *:a **:kw -> # TODO: enforce named args only?
+      for i in chain a kw.values! => i :: (Result, Node) =>
+        raise TypeError$ 'asty got a {}, convert to ast.expr or ast.stmt'.format (type i).__name__
+
+      if
+        loc_src :: Node =>
+          loc_src.loc                  or raise ValueError 'loc_src passed to asty has no loc'
+          filename, lineno, charno, rawline = loc_src.loc
+        loc_src :: ast.AST =>
+          lineno = loc_src.lineno      or raise ValueError 'loc_src passed to asty has no loc'
+          charno = loc_src.col_offset  or raise ValueError 'loc_src passed to asty has no loc'
+        otherwise =>
+          raise TypeError (type loc_src, loc_src)
+
+      out = AST *:a **:kw
+      out.lineno         = lineno
+      out.col_offset     = charno
+      #out.end_lineno     = # TODO
+      #out.end_col_offset = # TODO
+      return out
+    wrapper = bind wrapper (getattr ast key)
+    setattr self key wrapper # cache it
+    return wrapper

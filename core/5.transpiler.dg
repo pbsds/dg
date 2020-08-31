@@ -1,0 +1,1203 @@
+import '/ast' # https://greentreesnakes.readthedocs.io/en/latest/nodes.html#top-level-nodes
+
+inf = float 'inf'
+
+
+#: Compile some source code.
+#:
+#: transpile :: str (Optional str) -> types.CodeType
+#:
+transpile = data filename: '<string>' globals: () **:kw -> transpileast (parse data filename) globals **:kw
+
+
+#: Compile the contents of a file-like object.
+#:
+#: transpilefd :: TextIOBase (Optional str) (Optional (iter str)) -> types.CodeType
+#:
+transpilefd = fd filename: '<stream>' globals: () **:kw -> transpileast (parsefd fd filename) globals **:kw
+
+
+#: Compile a dogelang AST into Python bytecode or [ast.stmt].
+#:
+#: transpileast :: Node (Optional (iter str)) -> (Union types.CodeType (iter ast.stmt))
+#:
+transpileast = node globals: () as_bytecode: False ->
+  @ = Transpiler node
+  @all_vars |= set globals | set (@symbols node)
+  result = @load!.with_expr_as_stmt
+  module = asty.Module @node result.stmts type_ignores:[]
+  filename = node.loc !! 0
+  if not as_bytecode => module
+     otherwise   => (import '/builtins' pure).compile
+       ast.fix_missing_locations module # should not be needed
+       filename
+       mode: 'exec'
+
+
+asttree2python_source = tree -> "import dg; __builtins__.update(dg.BUILTINS)\n" +
+  import '/string/ascii_letters'
+  import '/astor'
+  python_keywords = set'
+    "async"
+    "if"
+    "def"
+    "from"
+    "finally"
+    "import"
+
+  f = x ->
+    x in python_keywords => x += "_"
+    x = x.replace "'" "_"
+    x = x.replace "!" "_"
+    x = x.replace "-" "_"
+    x = x.replace ":" "_"
+    x = x.replace "<" "_"
+    x = x.replace ">" "_"
+    x = x.replace "@" "self"
+    # TODO support user defined operators
+
+  for node in ast.walk tree =>
+      if node :: ast.FunctionDef       => node.name = f(node.name)
+      if node :: ast.AsyncFunctionDef  => node.name = f(node.name)
+      if node :: ast.arg               => node.arg  = f(node.arg)
+      if node :: ast.Name =>
+          a = (head node.id) in ascii_letters
+          b = node.id in BUILTINS
+          if  not a and b => node.id = "__builtins__[{!r}]".format(node.id)
+              otherwise   => node.id = f(node.id)
+
+  if  astor `hasattr` "code_gen" => astor.code_gen.to_source tree
+      otherwise                  => astor.codegen.to_source  tree
+
+
+# TODO: rename the functions above to 'compile'
+
+#: Raise a `SyntaxError` regardless of arguments.
+#:
+#: undefined :: str -> Handler
+#:
+#:   where Handler = Transpiler Node [Node] -> Result
+#:      -- a compiler-defined function. First argument is function name,
+#:         second argument is the list of arguments.
+#:
+undefined = desc -> node args ~> raise node.invalid desc
+
+
+#: Enforce argument count limits on a compile-time function.
+#:
+#: fix :: int int Handler -> Handler
+#:
+fix = min max h -> node args ~> h self node args where
+  len args < min => raise node.invalid $ 'got {} arguments, min. {}'.format (len args) min
+  len args > max => raise node.invalid $ 'got {} arguments, max. {}'.format (len args) max
+
+
+#: Load all arguments, apply all args as a list to the ast.AST
+#:
+#: apply_list :: (asty Any) (Optional (-> asty.expr_context)) -> Handler
+#:
+apply_list = ASTY ctx: asty.Load -> op args ~>
+  result = Result!
+  result += args = list$ map @load args
+  result += ASTY op ctx:(ctx op)
+    list$ map Result.get_expr args
+
+
+#: Load the argument, apply a unary operator
+#:
+#: apply_bin_op :: asty.operator -> Handler
+#:
+apply_unary_op = operator -> fix 1 1 $ op [arg] ~>
+  result = Result!
+  result += arg = @load arg
+  result += asty.UnaryOp op (operator op) arg.expr
+
+
+#: Load the arguments, apply a binary op
+#:
+#: apply_bin_op :: asty.operator -> Handler
+#:
+apply_bin_op = operator -> fix 2 2 $ op [lhs, rhs] ~>
+  result = Result!
+  result += (lhs, rhs) = (@load lhs, @load rhs)
+  result += asty.BinOp op lhs.expr (operator op) rhs.expr
+
+
+#: Accept 1+ arguments, but make `f a b c ...` same as `f (a b c ...)`.
+#:
+#: autocall :: Handler -> Handler
+#:
+autocall = h -> fix 1 inf $ f xs ~> h self f $ if
+  len xs > 1 => [Expression f.loc *: xs]
+  otherwise  => xs
+
+
+#: Turn a handler that accepts pairs of nodes into one that accepts `u => v` nodes.
+#:
+#: pair_args :: (Transpiler Node [(Node, Node)] -> Result) -> Handler
+#:
+pair_args = h -> f xs ~>
+  pairs = getattr f '_arrpairs' None
+  pairs is None =>
+    # In `if` and `except` the whole first line is clamped into a single argument,
+    # so `if (1 => 2) (3 => 4)` is the same thing as `if ((1 => 2) (3 => 4))`.
+    # We'll treat these as separate arguments for a shorthand notation.
+    if len xs == 1 and head xs :: Expression and (head xs).op == '' => xs = (head xs).args
+    # This decorator needs to be applied to both the emitter function
+    # AND the symbol scanner, so we'll cache the result.
+    pairs = f._arrpairs = list
+      where for x in xs => yield if
+        x :: RightBind  and x.op == '=>' => raise x.invalid 'no `u` in `u => v`'
+        x :: LeftBind   and x.op == '=>' => x.args + [Constant x.loc None]
+        x :: Expression and x.op == '=>' => x.args
+        otherwise => raise x.invalid 'expected `u => v`'
+  h self f f._arrpairs
+
+
+#: Infix bind handler: turn `x R` or `R x` into `x R None`.
+#:
+#: default_to_none :: Handler
+#:
+default_to_none = f [x] ~> @loadcall f x $ Constant f.loc None
+
+
+#: Given two (or more) arguments, pick the first that matches a jump condition.
+#: TODO: change ^
+#:
+#: shortcircuit :: bool -> Handler
+#:
+shortcircuit = short_when -> fix 2 inf $ f args ~>
+  args = list$ map @load args
+  inline = all$ map (arg->not arg.stmts) args
+
+  return if
+    inline => Result$ asty.BoolOp f
+      if  short_when == True  => asty.Or  f
+          short_when == False => asty.And f
+      list$ map Result.get_expr args
+
+    not inline => result where
+      # todo, hide tmp names, make a stack to avoid clobbering during nesting
+      tmpval, tmpout = '!tmpval', '!tmpout'
+
+      make_if = ->
+        cond = @loadname tmpval
+        short_when == False =>
+          cond = (apply_unary_op$ asty.Not f) self f [cond]
+        asty.If f
+          cond.expr                                      # test
+          @loadassign tmpout (@loadname tmpval) |>.stmts # body
+          []                                             # orelse
+
+      result = @loadassign tmpout (@loadconst None) # result.expr is now a pure reference to the name
+      prev_if = result.stmts
+      for arg in args => # we iterate to avoid the python callstack limit
+        prev_if.extend (arg + (@loadassign tmpval arg.expr) + make_if!).stmts
+        prev_if = this_if.orelse
+
+
+# TODO: rename compare' to compare when Compiler is gone
+
+#: Given two arguments, return the result of comparing them with a suitable
+#: function.
+#:
+#: compare :: Handler
+#:
+compare' = fix 2 2 $ op [lhs, rhs] ~>
+  chain = []
+  # TODO: ^ deque?
+  # `a R x1 Q x2 ... xn P b` where `R`, `Q`, and so on are comparison operators
+  # is a single chain that is equivalent to `a R x1 and ... and xn P b`.
+  while lhs :: Expression and not lhs.closed and @getinternal lhs.op.value is compare' =>
+    # `chain` should become `[(R, x1), (Q, x2), ...]`.
+    chain.insert 0 (lhs.op, snd (lhs, _ = lhs.args))
+  chain.append (op, rhs)
+
+  node2op = op -> if
+    not op :: Expression => raise TypeError$ type
+    op.value == '=='     => asty.Eq    op
+    op.value == '!='     => asty.NotEq op
+    op.value == '<'      => asty.Lt    op
+    op.value == '<='     => asty.LtE   op
+    op.value == '>='     => asty.Gt    op
+    op.value == '>'      => asty.GtE   op
+    op.value == 'is'     => asty.Is    op
+    #op.value == ''     => asty.IsNot op
+    op.value == 'in'     => asty.In    op
+    #op.value == ''     => asty.NotIn op
+    otherwise            => raise AssertionError op
+
+  # TODO: shortcircuit the stmts
+
+  result = Result!
+  result += left   = @load lhs
+  ops              = list$ map ((op, right) -> node2op op)  chain
+  result += rights = list$ map ((op, right) -> @load right) chain
+  result += asty.Compare op
+    left       : left.expr
+    ops        : ops
+    comparators: (list$ map Result.get_expr rights)
+  result
+
+
+#: Recursively walks down a Node tree, resulting in a Result
+Transpiler = subclass object where
+  __init__ = node parent: None new_closure: False ~> None where
+    node :: Node or raise TypeError (type node, node) # TODO: remove
+    @node   = node
+    @parent = parent
+
+    @docstr    = None
+    @qualname  = "None" # TODO
+    @name      = "None" # TODO
+
+    if
+      # share closure with parent
+      not new_closure and parent =>
+        # we mutate these references
+        @all_vars      = parent.all_vars
+        @nonlocal_vars = parent.nonlocal_vars
+        @local_vars    = parent.local_vars
+      # new enclosed closure
+      new_closure and parent and parent.parent =>
+        @all_vars      = set!
+        @nonlocal_vars = parent.local_vars | parent.nonlocal_vars
+        @local_vars    = set!
+      # top level
+      otherwise =>
+        @all_vars      = set! # all names we assign to, used to deduce used globals and non-locals
+        @nonlocal_vars = set! # names known to be non-local
+        @local_vars    = set! # local names we assign to, bound to this closure
+    new_closure => @regsyms @node
+    not parent =>
+      Transpiler._serial = itertools.count 1 # shared static object per module
+  _make_hidden_varname = ~> "!{}".format @_serial.__next__! # deterministic and unique output
+
+  #: _transpile_self :: ast.expr_context -> Result
+  _transpile_self = ctx ~> if # TODO: remove ctx, default to Load
+    @node :: Name       => Result$ asty.Name @node @node.value ctx:ctx
+    @node :: Constant   => @loadconst @node.value
+    @node :: LeftBind   => @loadbind False @node.op *: @node.args
+    @node :: RightBind  => @loadbind True  @node.op *: @node.args
+    @node :: Expression => @loadcall       @node.op *: @node.args
+    otherwise           => raise @node.invalid$ 'unknown node type {}'.format type @node
+
+  # load :: Node -> Result ( .expr.ctx == ast.Load! )
+  load = node: None ~>
+    ## TODO: due to making new Transpilers, @docstr gets ignored
+    #node.doc => @docstr = node.doc
+    result = if
+      node :: ast.expr => Result node
+      node :: Result   => node
+      node is None     => @_transpile_self (asty.Load @node)
+      otherwise        => (Transpiler node self)._transpile_self (asty.Load node)
+    #node.doc => @docstr = node.doc
+    result
+
+  # del :: Node -> Result ( .expr.ctx == ast.Del! )
+  del = node: None ~>
+    result = if
+      node is None       => @_transpile_self (asty.Del @node)
+      otherwise          => (Transpiler node self)._transpile_self (asty.Del node)
+    # TODO: deletize
+
+  # store :: Node -> Result ( .expr.ctx == ast.Store! )
+  store = node: None ~>
+    result = if
+      node is None       => @_transpile_self (asty.Store @node)
+      otherwise          => (Transpiler node self)._transpile_self (asty.Store node)
+    not result.is_only_expr =>
+      raise node.invalid 'not something one can assign to'
+    # TODO: all_vars.add
+    _storeize = expr -> if
+      expr :: ast.Tuple     => asty.Tuple     expr ctx:(asty.Store expr) elts: (list$ map _storeize expr.elts)
+      expr :: ast.List      => asty.List      expr ctx:(asty.Store expr) elts: (list$ map _storeize expr.elts)
+      expr :: ast.Name      => asty.Name      expr ctx:(asty.Store expr) id: expr.id
+      expr :: ast.Subscript => asty.Subscript expr ctx:(asty.Store expr) value: expr.value slice: expr.slice
+      expr :: ast.Attribute => asty.Attribute expr ctx:(asty.Store expr) value: expr.value attr:  expr.attr
+      expr :: ast.Starred   => asty.Starred   expr ctx:(asty.Store expr) (_storeize expr)
+      otherwise             => (node or @node).invalid 'not something one can assign to'
+    result._expr = _storeize result._expr
+    return result
+
+
+  #: loadconst :: Any -> Result
+  loadconst = value ~>
+    result = Result$ if
+      # TODO: asty.Constant for py3.8 and above
+      value is None     => asty.NameConstant @node value # TODO: Probably parsed as a name
+      value :: bool     => asty.NameConstant @node value # TODO: True, False and otherwise get parsed as Name
+      value :: int      => asty.Num          @node value
+      value :: float    => asty.Num          @node value
+      value :: complex  => asty.Num          @node value
+      value :: str      => asty.Str          @node value
+      value :: bytes    => asty.Bytes        @node value
+      value :: Ellipsis => asty.Ellipsis     @node value # TODO: ... is parsed as a Name
+      value :: Tuple    => asty.Tuple        @node (list$ map @loadconst value) ctx: (asty.Load @node)
+      otherwise         => raise TypeError$ 'unknown Constant value: {!r}'.format value
+    result.set_expr_pure!
+
+  loadname = name ~> # TODO: remove
+    @load$ Name @node.loc False name
+
+  #: If a function is compiler-defined, return its implementation.
+  #:
+  #: getinternal :: str -> Maybe Handler
+  #:
+  getinternal = name ~>
+    f = @prefix.get name None
+    if not f => None
+       # Since the symbol scanner has already finished, this function
+       # is expected to be compile-time.
+       name in @symscan => f
+       # Local variables override compile-time builtins.
+       name in @local_vars or name in @nonlocal_vars or name in @all_vars => None
+       otherwise => f
+
+  #: Call `func` with `args`
+  #: loadcall :: Node *Node -> Result
+  loadcall = f *: args ~> if
+    # compile-time function/expression
+    f :: Name and (g = @getinternal f.value) => g self f args
+    # Infix functions don't get fancy syntax.
+    # When using infix operators, varargs and keyword arguments are disabled.
+    f.infix and not f.closed =>
+      result = Result!
+      result += f = @load f
+      result += args = list$ map @load args
+      result += asty.Call @node
+        func: f.expr
+        args: (list$ map Result.get_expr args)
+        keywords: []
+      result
+
+    # Full function call syntax
+    otherwise =>
+      @loadcall' (@load f) [] args
+
+  #: Call `func` with `loadedposargs` + `args`.
+  #: `func` is assumed to not be infix.
+  #: loadcall' :: Result [Result] [Node] -> Result
+  loadcall' = func loadedposargs args ~>
+      result = Result!
+      result += func
+      result += loadedposargs
+
+      # args, kwargs, starargs, starkwargs
+      a, kw, va, vkw = [], {}, [], [] # all contain ast.expr
+      a.extend$ map Result.get_expr loadedposargs
+      for x in args => if
+        x :: Expression and x.op == ':' => if
+          len x.args != 2    => raise x.invalid$'binary operator ":" with {} args'.format (len x)
+          x :: LeftBind      => raise x.invalid 'keyword argument without a value'
+          x :: RightBind     => raise x.invalid 'keyword argument without a name'
+          fst x.args in kw   => raise x.invalid 'keyword arguments must be unique'
+          fst x.args == '*'  => va.append  (result += @load$ snd x.args).expr
+          fst x.args == '**' => vkw.append (result += @load$ snd x.args).expr
+          fst x.args :: Name => kw !! (fst x.args).value = (result += @load$ snd x.args).expr
+          otherwise          => raise x.invalid 'keyword arguments cannot be patterns'
+        otherwise =>
+          a.append$ (result += @load x).expr
+
+      len a  > 255 => raise (head argv).invalid 'too many positional arguments'
+      len kw > 255 => raise (head argv).invalid 'too many keyword arguments'
+
+      # TODO: py3.4 doesn't support asty.Starred
+      # TODO: py3.4 ast.Call requires the parameters 'starargs' and 'kwargs'
+
+      result += asty.Call @node
+        func: func.expr
+        args:
+          list$ chain a
+            map (bind asty.Starred @node ctx:(asty.Load @node)) va # ONLY py3.5 and up
+        keywords:
+          list$ chain
+            map (bind asty.keyword @node) kw.keys! kw.values!
+            map (bind asty.keyword @node None) vkw                 # ONLY py3.5 and up
+
+  #: Evaluate each element in node, return the value of the last
+  #: loadlast :: [Node] -> Result
+  loadlast = (*nodes, node_last) ~> result where
+    result = Result!
+    for i in map @load nodes =>
+      result += i.with_expr_as_stmt
+    result += @load node_last
+
+  #: Load value, storing it to target in the process
+  #: loadassign :: (Union Node str) Node (Optional asty.operator) -> Result
+  loadassign = target value aug_op:None ~> result where # TODO: swap order of args?
+    target :: str => target = Name @node.loc False value
+    for s in @symbols' target => @all_vars.add s
+
+    # TODO: should hidden variables be a part of scope?
+    hidden_target = Name @node.loc False @_make_hidden_varname
+    targets = list$ map @store [hidden_target, target]
+    for i in targets => i.is_only_expr or raise AssertionError 'Result with stmts in ast.Store ctx'
+    targets = list$ map Result.get_expr targets
+
+    result = @load value
+    result += if
+      aug_op    => asty.AugAssign @node targets (aug_op @node) result.expr
+      otherwise => asty.Assign    @node targets                result.expr
+    result += @load hidden_target # To avoid a deferred load
+
+  #: Given an AST, find out which local variables it creates.
+  #:
+  #: symbols :: Node... -> iter str
+  #:
+  symbols = *: xs ~> for x in xs =>
+    # Only expressions may create variables.
+    x :: Expression => yield from $ if
+      # Compile-time macros may override symbol scans in a way similar to using `prefix`.
+      x.op :: Name and (fn = @symscan.get x.op.value) => fn self x.op x.args
+      # Default behavior is to push the function, then push the arguments, so we scan them.
+      otherwise => @symbols x.op *: x.args
+
+  #: Symbol scanner for `loadassign`. Returns an iterator of modified variables.
+  #:
+  #: symbols' :: Node... -> iter str
+  #:
+  symbols' = *: xs ~> for x in xs => if
+    x :: Expression => if
+      x.op in (',', '*', ':', "list'") => yield from $ @symbols' *: x.args
+      # Assignments to anything else do not create new variables.
+      otherwise => yield from $ @symbols x
+    x :: Name => if
+      x == '@'  => yield 'self'
+      otherwise => yield x.value
+
+  #: Ensure an AST can have access to all local variables it needs.
+  #:
+  #: regsyms :: Node -> a
+  #:
+  regsyms = x ~> for s in @symbols x => @local_vars.add s
+
+  symscan = dict'
+    '', f args ~> @symbols $ Expression f.loc *: args
+    '->',    _ _ ~> ()  # These operators create new functions, with brand new
+    '~>',    _ _ ~> ()  # local namespaces. They will call `symbols` on their own.
+    '->>',   _ _ ~> ()
+    '~>>',   _ _ ~> ()
+    'where', _ _ ~> ()
+
+    '=', fix 2 2 $ f (n, x) ~>
+      yield from $ @symbols' n
+      yield from $ @symbols  x
+
+    'for', fix 1 2 $ f (var, *body) ~>
+      not $ var :: Expression and var.op == 'in' and len var.args == 2 => raise var.invalid $ if
+        # In Python, `in` has a higher precedence than `,`. That is,
+        # if you simply write `a, b in c` you get `a, (b in c)`. `for a, b in c:`
+        # is merely a special case in the parser; dg has no such thing.
+        var :: Expression and var.op == ',' and not var.closed => 'forgot the parentheses?'
+        otherwise => 'should be `for a in b => ...`'
+      v, e = var.args
+      yield from $ @symbols' v
+      yield from $ @symbols  e *: body
+
+    'except', fix 1 inf $ pair_args $ f ((e, x), *y) ~>
+      yield from $ @symbols' e
+      yield from $ @symbols  x
+      for t in y => yield from $ @symbols *: t
+
+    'import', fix 1 inf $ f (name, *flags) ~>
+      qual  = False
+      pure  = False
+      const = name :: Constant and name.value :: str
+
+      for flag in flags => if
+        flag == 'qualified' => qual = True
+        flag == 'pure'      => pure = True
+        otherwise => raise flag.invalid 'unsupported import modifier'
+
+      f._impdata = const, qual, pure, if
+        not const => yield from @symbols name
+        otherwise =>
+          parent, h, t = except
+            err => (BUILTINS !! '!importname') name.value
+            err :: ImportError => raise name.invalid $ str err
+
+          t and last t == '*' => if
+            pure  => raise name.invalid 'star imports are always impure'
+            qual  => raise name.invalid 'star imports are always unqualified'
+            @parent => raise name.invalid 'star imports can only appear at global level'
+
+          var = if qual or not t => h
+                   otherwise     => last t
+          yield var
+          parent, [h] + t, var
+
+  #: TODO
+  load_global_nonlocal_stmts = ~> Result stmts:
+    where for name in (@local_vars | @all_vars) => if
+      not name :: str        => raise TypeError (type name, name)
+      name in @local_vars    => None
+      name in @nonlocal_vars => yield asty.NonLocals @node [name]
+      otherwise              => yield asty.Global    @node [name]
+
+  #: Default infix bind implementation.
+  #:
+  #: `x R` <=> `y -> x R y`
+  #: `R x` <=> `y -> y R x`
+  #:
+  #: loadbind :: bool Name Node -> Result
+  #:
+  loadbind = right f arg ~>
+    g = @getinternal f.value
+    if # Makes tno sense to use compile-time partial bindings if the function itself
+       # has no compile-time definition.
+       g and f.value in @infixl and not right => (@infixl !! f.value) self f [arg]
+       g and f.value in @infixr and     right => (@infixr !! f.value) self f [arg]
+       g and not (f.value in BUILTINS) =>
+         # Note that partial binding of macros does not actually use
+         # runtime functions (as `pushcall` will prefer compile-time ones.)
+         # Still, this is a pretty good method of checking if
+         # someone's attempting to partially bind assignment operators, etc.
+         raise f.invalid 'this operator requires both arguments'
+       # Default binding: `x R` -> `y -> x R y`; `R y` -> `x -> x R y`.
+       otherwise =>
+        a1, a2 = if right     => '<L>', '<R>'
+                    otherwise => '<R>', '<L>'
+        @loadfuncdef False
+          Expression f.loc ''
+            Name f.loc False a1
+            Expression f.loc ':'
+              Name f.loc False a2
+              arg
+          Expression f.loc
+            Name f.loc False f.value # TODO: is infix bad?
+            Name f.loc False '<L>'
+            Name f.loc False '<R>'
+
+  #: Define a function
+  #: The last optional Node is used to infer the function name
+  #: loadfuncdef :: bool Node Node (Optional Node) (Optional bool) -> Result
+  loadfuncdef = is_async args body assign: None as_method: False ~>
+    funcname = "<lambda>" # TODO: unreachable, but visible with locals()
+    # TODO: perhaps use a unique id?
+    assign :: Expression and assign.op == "=" =>
+     assign.args and head assign.args :: Constant =>
+       funcname = (head assign.args).value
+    # TODO: try to set `assign`
+
+    # parse function arguments
+    a, kw, da, dkw, va, vkw, patterns = if
+      args is None => [], [], [], {}, [], [], {}
+      otherwise    => parse_defn_args args # TODO: modify this function to reduce the code transforms below
+
+    # pop singletons
+    va  = va  or None => head va
+    vkw = vkw or None => head vkw
+    # expand and load dkw to a list matching kw elementwise, with None as default
+    dkw = list$ map (x -> x in dkw or None => @load (dkw !! x)) kw
+    as_method => a.insert 0 'self'
+
+    result = Result!
+    result += da = list$ map @load da
+    result += filter bool dkw # filter out `None`
+
+    Arg = bind asty.arg @node annotation: None # TODO: better loc
+    # ^ annotations not supported in dg yet
+    arguments = asty.arguments @node
+      args        : (list$ map Arg a)
+      kwonlyargs  : (list$ map Arg kw)
+      defaults    : (list$ map Result.get_expr   da)
+      kw_defaults : (list$ map (x->x => x.expr) dkw)
+      vararg      : (va  => Arg va)
+      kwarg       : (vkw => Arg vkw)
+
+    # TODO: check regsyms
+
+    closure = Transpiler body self new_closure: True
+    bodyres = Result!
+    bodyres += map ((name, target) -> closure.loadassign target (closure.loadname name)) patterns.items!
+    bodyres += closure.load!
+    bodyres += asty.Return @node value: bodyres.expr # TODO: ensure loc is the `->`
+    closure.load_global_nonlocal_stmts
+    bodyres = bodyres
+    bodyres.is_only_stmts or raise AssertionError bodyres
+
+    # TODO: docstring
+    FunctionDef = if
+      is_async  => asty.AsyncFunctionDef
+      otherwise => asty.FunctionDef
+
+    # TODO: also support lambda x: expr
+    hidden_name = @_make_hidden_varname + "-" + funcname # TODO: any way to hide this name in stack traces?
+    result += list'
+      FunctionDef @node
+        name: hidden_name
+        args: arguments
+        body: bodyres.stmts
+        decorator_list: [] # IDEA: pass a lambda in here which does the __name__ thing
+
+      # TODO: replace below with loadmacro
+      asty.Assign @node
+        list'$ asty.Attribute @node ctx:(asty.Store @node)
+          asty.Name @node hidden_name  ctx:(asty.Load @node)
+          attr: "__name__"
+        value: (@loadconst funcname).expr
+
+      asty.Assign @node
+        list'$ asty.Attribute @node ctx:(asty.Store @node)
+          asty.Name @node hidden_name  ctx:(asty.Load @node)
+          attr: "__qualname__"
+        value: (@loadconst funcname).expr
+
+    result += asty.Name @node hidden_name ctx:(asty.Load @node) # TODO: local_vars
+
+  #: TODO
+  #: loadmethoddef :: bool Node Node (Optional Node) -> Result
+  loadmethoddef = bind loadfuncdef as_method: True
+
+  #: TODO
+  #: loadif :: Node [(Node, Node)] ~> Result
+  loadif = f cases ~> result where
+    cases = list$ map ((cond, action) -> (cond, @load cond, @load action)) cases
+    # cases :: [(Node, Result, Result)]
+
+    any_stmt = any
+      where for (loc, cond, action) in cases => yield
+        cond.stmts or cond.stmts
+
+    # ast.expr version
+    if not any_stmt =>
+      # iterate to avoid hitting the python callstack limit
+      result = Result$ foldl1 # TODO: add foldr1
+        b a ->
+          a.orelse = b
+          a
+        where
+          yield (@loadconst None).expr # trailing `otherwise => None`
+          for (loc, cond, body) in reversed cases =>
+            yield asty.IfExp loc
+              cond.expr
+              body.expr
+              orelse: None # mutated by foldl1
+
+    # [ast.stmt] version:
+    if any_stmt =>
+      # todo, hide tmp names, make a stack to avoid clobbering during nesting
+      tmpname = "!ifretval"
+
+      result = @loadassign tmpname (@loadconst None) # result.expr is now a pure reference to the name
+      prev_orelse = result.stmts
+      for (loc, cond, body) in cases => # we iterate to avoid the python callstack limit
+        this_if = asty.If f
+          cond.expr                                       # test
+          body + (@loadassign tmpname body.expr) |>.stmts # body
+          []                                              # orelse
+
+        prev_orelse.extend (cond + this_if).stmts
+        prev_orelse = this_if.orelse
+
+  #: Load a try except
+  #:
+  #: If any condition matched, the assigned action is evaluated and its value returned. If not,
+  #: but no exception was raised, the value of `try` is returned instead. (`name` is where the
+  #: exception [or None] is stored.)
+  #:
+  #: loadexcept :: Node Name Node [(Node, Node)] (Maybe Node) -> a
+  #:
+  loadexcept = f excname try cases finally ~>
+    Try = try handler final -> asty.Try f try [handler] [] final
+
+    tmpname = Name f.loc False @_make_hidden_varname
+
+    try     = @load try
+    try    += @loadassign tmpname try.expr
+    exc     = @loadname '!BaseException'
+    excname = @store excname # TODO: must be a Name, convert to string
+    finally = if finally is None => [asty.Pass f] # TODO: needed?
+                 otherwise       => (@load finally).with_expr_as_stmt.stmts
+    handler  = @loadif f $ cases +:
+      tuple' # append a `otherwise => raise!`
+        Constant f.loc True
+        Result stmts: [asty.Raise f None None]
+    handler += @loadassign tmpname handler.expr
+
+    result = Result!
+    result += exc
+    result += excname
+    result += asty.Try f
+      try.stmts
+      list'$ asty.ExceptHandler f
+        type: exc.expr # TODO: can this be None?
+        name: excname.expr # TODO: pass in string here
+        body: handler.stmts
+      orelse: []
+      finalbody: finally
+
+    result += @load tmpname
+
+
+  loadawait = node ~>
+    # TODO: python 3.4
+    result = @load node
+    result += asty.Await node result.expr
+
+  #: Built-in functions of any arity.
+  #: prefix !! str :: Handler
+  prefix = dict'
+    '',    op (func,   *args) ~> @loadcall func *: args
+    '\n',  op nodes           ~> @loadlast nodes
+    '=',   fix 2 2 $ op (name, value) ~> @loadassign name value
+    ':=',  fix 2 2 $ op (name, value) ~> @loadassign name value # TODO: difference? use non-local ?
+    '->',  fix 2 2 $ op (args, body)  ~> @loadfuncdef   op.async args body
+    '~>',  fix 2 2 $ op (args, body)  ~> @loadmethoddef op.async args body
+    '->>', fix 2 2 $ op (args, body)  ~> @loadfuncdef   True     args body
+    '~>>', fix 2 2 $ op (args, body)  ~> @loadmethoddef True     args body
+
+    ':',      undefined 'keyword argument to what function?'
+    '!',      undefined 'this operator is postfix'
+    '~',      undefined 'this operator is prefix'
+    '@',      undefined 'this operator is prefix'
+    '@@',     undefined 'this operator is prefix'
+    # XXX Python 3.5 allows packing multiple lists into one.
+    #     For example, [a_1, a_2, ..., *xs_1, b_1, ..., *xs_2, ...]
+    #     first pushes [a_1, a_2, ...], then xs_1, then [b_1, ...], then xs_2, etc.,
+    #     before finally joining them with BUILD_LIST_UNPACK(no_of_lists).
+    #     Same with tuples (BUILD_TUPLE_UNPACK) and dicts (BUILD_MAP_UNPACK).
+    ',',      apply_list asty.Tuple  # TODO: asty.Starred
+    "set'",   apply_list asty.Set    # TODO: asty.Starred
+    "list'",  apply_list asty.List   # TODO: asty.Starred
+    "tuple'", apply_list asty.Tuple  # TODO: asty.Starred
+    'or',     shortcircuit short_when: True
+    '=>',     shortcircuit short_when: False
+    'and',    shortcircuit short_when: False
+    'not',    apply_unary_op asty.Not
+    '+',      apply_bin_op   asty.Add
+    '-',      apply_bin_op   asty.Sub
+    '*',      apply_bin_op   asty.Mult
+    '**',     apply_bin_op   asty.Pow
+    '/',      apply_bin_op   asty.Div
+    '//',     apply_bin_op   asty.FloorDiv
+    '%',      apply_bin_op   asty.Mod
+    '&',      apply_bin_op   asty.BitAnd
+    '^',      apply_bin_op   asty.BitXor
+    '|',      apply_bin_op   asty.BitOr
+    '<<',     apply_bin_op   asty.LShift
+    '>>',     apply_bin_op   asty.RShift
+    '+=',     fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.Add
+    '-=',     fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.Sub
+    '*=',     fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.Mult
+    '**=',    fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.Pow
+    '/=',     fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.Div
+    '//=',    fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.FloorDiv
+    '%=',     fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.Mod
+    '&=',     fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.BitAnd
+    '^=',     fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.BitXor
+    '|=',     fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.BitOr
+    '<<=',    fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.LShift
+    '>>=',    fix 2 2 $ op (name, value) ~> @loadassign name value aug_op: asty.RShift
+    'is',     compare'
+    'in',     compare'
+    '<',      compare'
+    '<=',     compare'
+    '==',     compare'
+    '!=',     compare'
+    '>=',     compare'
+    '>',      compare'
+
+    # getitem
+    '!!',  fix 2 2 $ op (container, index) ~> # TODO, this function is a often repeated pattern
+      result = Result!
+      result += container = @load container
+      result += index_res = @load index
+      result += asty.Subscript op
+        container.expr
+        asty.Index index index_res.expr
+        asty.Load op
+
+    # delitem
+    '!!~', fix 2 2 $ op (container, index) ~>
+      result = Result!
+      result += container = @load container
+      result += index_res = @load index
+      result += asty.Delete op targets:
+        list'$ asty.Subscript op
+          container.expr
+          asty.Index index index_res.expr
+          asty.Del op
+      result += @loadconst None
+
+    ## Inplace assign for getitem
+    '!!=', fix 2 2 $ op (container, index) ~> # TODO: test
+      result  = container_res = @load container
+      result += index_res     = @load index
+      result += asty.Subscript op
+        container_res.expr
+        asty.Index index index_res.expr
+        asty.Load op
+      result += @loadassign container result.expr
+
+    #: Get an attribute of an object by name.
+    '.', fix 2 2 $ op (obj, attribute) ~>
+      attribute :: Name or raise y.invalid 'not an attribute'
+      result = @load obj
+      result += asty.Attribute op result.expr attribute.value ctx:(asty.Load op)
+
+    #: Right pipe into attribute getter: `a |>.b` <=> `(a).b`
+    '|>.', fix 2 2 $ op (obj, attribute) ~>
+      attribute :: Name or raise y.invalid 'not an attribute'
+      result = @load obj
+      result += asty.Attribute op result.expr attribute.value ctx:(asty.Load op)
+
+    #: Call and take an attribute of the result: `a!.b` <=> `(a!).b`
+    '!.', fix 2 2 $ op (func, attribute) ~>
+      attribute :: Name or raise y.invalid 'not an attribute'
+      result = @loadcall func
+      result += asty.Attribute op result.expr attribute.value ctx:(asty.Load op)
+
+    #: Delete an attribute of an object by name.
+    '.~', fix 2 2 $ op (obj, attribute) ~>
+      attribute :: Name or raise y.invalid 'not an attribute'
+      result = @load obj
+      result += asty.Delete op $ list'
+        asty.Attribute op result.expr attribute.value ctx:(asty.Del op)
+      result += @loadconst None
+
+    #: Haskell-style left pipe: `a $ b` <=> `a (b)`.
+    '$', fix 2 2 $ op (g, x) ~>
+      x.closed = True
+      g_open_call = g :: Expression and not g.closed and g.op == ''
+      if g_open_call => @loadcall g.op *: (g.args +: x)
+         otherwise   => @loadcall g x
+
+    #: Left pipe: `a <| b` <=> `a (b)`.
+    '<|', fix 2 2 $ op (g, x) ~>
+      x.closed = True
+      g_open_call = g :: Expression and not g.closed and g.op == ''
+      if g_open_call => @loadcall g.op *: (g.args +: x)
+         otherwise   => @loadcall g x
+
+    #: Right pipe: `a |> b` <=> `b (a)`.
+    '|>', fix 2 2 $ op (x, g) ~>
+      x.closed = True
+      g_open_call = g :: Expression and not g.closed and g.op == ''
+      if g_open_call => @loadcall g.op *: (g.args +: x)
+         otherwise   => @loadcall g x
+
+    #: Import a module given a POSIX-style path.
+    #:
+    #: import '/sys'                 imports a module named 'sys'
+    #: import '/os/path' qualified   imports a module named 'os' with a submodule 'path'
+    #: import '/dg/addon/fork'       imports 'fork' from package 'dg.addon'
+    #: import 'markup'               imports 'markup' from the current package
+    #: import '../smth' pure         imports 'smth' from the parent package, returns it
+    #:                               but does not create a variable
+    #:
+    'import', fix 1 inf $ op (name, *flags) ~>
+      const, qualified, pure, parsed = op._impdata
+      parent, path, target = parsed # (int, list str, str)
+      result = Result!
+
+      if
+        # a = import expression
+        not const or pure =>
+          not pure => raise name.invalid 'side-effecting imports should be constant'
+          result += @loadcall'
+            @loadname '!import'
+            list'
+              @loadcall' (@loadname '!importname') [@load name] []
+              @loadname  '__package__'
+              @loadconst qualified
+            []
+
+
+        # import x
+        qualified or (parent == 0 and len path == 1) =>
+          result += asty.Import op
+              list'$ asty.alias name name: (head path) asname: None
+          result += @loadname$ head path # TODO: probably not safe
+          # TODO: return module reference
+
+        # from x import y
+        otherwise =>
+          *dir, file = path
+          result += asty.ImportFrom op
+            '.'.join dir
+            list'$ asty.alias name name: file asname: None
+            parent
+
+          if file == '*' => # return the module itself
+            result += @loadcall'
+              @loadname '!import'
+              list'
+                @loadconst (parent, head dir, tail dir)
+                @loadname  '!importname'
+                @loadname  '__package__'
+                @loadconst False
+              []
+          if file != '*' => # return the import
+            result += @loadname file
+          result.set_expr_pure!
+
+      return result
+
+    #: Local binding.
+    #:
+    #: I.e. `a where b` makes stuff from `b` only visible in `a`.
+    #:
+    'where', fix 2 2 $ op (ret, env) ~>
+      # TODO: disallow return?
+      FunctionDef = if
+        op.async  => asty.AsyncFunctionDef
+        otherwise => asty.FunctionDef
+
+      closure = Transpiler env self new_closure: True
+      closure.regsyms ret
+      body  = closure.load!.with_expr_as_stmt
+      body += closure.load ret
+      body += asty.Return ret body.expr
+      body.is_only_stmts or raise AssertionError body
+
+      Result
+        stmts:
+          list'$ FunctionDef op
+            name: '<where>' # TODO, dispose of this name, make it random
+            args: (asty.arguments op posonlyargs:[] args:[] vararg:None kwonlyargs:[] kw_defaults:[] kwarg:None defaults:[])
+            body: body.stmts
+            decorator_list: []
+        expr:
+          asty.Call op
+            func: (asty.Name op '<where>' ctx:(asty.Load op))
+            args: []
+            keywords: []
+
+    #: Duplicate the local namespace and turn it into a class.
+    #:
+    #: Tip: `where` is useful here.
+    #:
+    'subclass', op args ~>
+      # TODO: does `super` work?
+      @loadcall'
+        @loadname '!subclass'
+        list'
+          @loadcall$ Name op.loc False '!locals' # attrs
+          @loadconst @docstr                  # doc        TODO
+          @loadconst @qualname                   # qualname   TODO
+          @loadconst @name                       # name       TODO
+          @loadconst '__name__'                  # module
+        args                                     # *: bases **: kwds
+
+    #: Mark an operation as async.
+    #:
+    #: This is only supported by a few objects. `for` loops, `with` contexts,
+    #: `where` clauses and new functions can be async.
+    #:
+    'async', autocall $ f [x] ~> if
+      x :: Expression and x.op :: Name and @getinternal x.op.value in @asyncs =>
+        x.op.async = True
+        @load x
+      otherwise =>
+        raise f.invalid 'this cannot be async'
+
+    #: Await until an async operation is complete.
+    'await', autocall $ f [x] ~>
+      @loadawait x
+
+    #: Make the current function terminate early with a value. Only a single
+    #: value (which may be a tuple); `return f args` is `return (f args)`.
+    'return', autocall $ f [x] ~>
+      result = @load x
+      result += asty.Return f result.expr
+
+    #: Throw an exception. Like `return`, `raise f args` <=> `raise $ f args`.
+    'raise', autocall $ f [x] ~>
+      # TODO: __cause__: raise x from cause
+      result = @load x
+      result += asty.Raise f result.expr cause: None
+
+    #: Call __enter__ at the beginning and __exit__ at the end.
+    #:
+    #: Using an assignment as the context has special behavior: the assigned
+    #: value is the result of __enter__, not the context itself.
+    #:
+    'with', fix 2 2 $ f (ctx, body) ~>
+      var, ctx = if
+        ctx :: Expression and len ctx.args == 2 and ctx.op == '=' => ctx.args
+        otherwise => Name ctx.loc False '_', ctx
+
+      With = if
+        f.async   => asty.AsyncWith
+        otherwise => asty.With
+
+      # TODO: python 3.4 async
+      result = Result!
+      result += var = @store var
+      result += ctx = @load  ctx
+      result += With f
+        list'$ asty.withitem f ctx.expr var.expr
+        (@load body).with_expr_as_stmt
+      # TODO: return value?
+
+    #: Repeat while a condition is true.
+    #:
+    #:   while not done => do something
+    #:
+    'while', fix 2 2 $ f (cond, body) ~>
+      # TODO: return value?
+      body = @load body
+      result = cond = @load cond
+      While = bind asty.While f orelse: None
+      result += if
+        cond.stmts => While cond.expr (body.with_expr_as_stmt + cond.stmts) # TODO: test
+        otherwise  => While cond.expr (body.with_expr_as_stmt)
+
+    #: Iterate over something. Something may be asynchronous.
+    #:
+    #: Note that `var` may be any valid assignment target, not only a local variable.
+    #:
+    'for', fix 2 2 $ f (var, body) ~>
+      f.async =>
+        # TODO find a way to implement this in 3.4.
+        _PY_FEATURE_ASYNC or raise f.invalid 'no single asynchronous iteration convention in Python < 3.5'
+      # `var` was already syntax-checked in `symbols`.
+      # TODO: return value?
+      body = @load body
+      result = cond = @load cond
+      For = if
+        f.async   => bind asty.For      f orelse: None
+        otherwise => bind asty.AsyncFor f orelse: None
+      result += if
+        cond.stmts => For cond.expr (body.with_expr_as_stmt + cond.stmts) # TODO: test
+        otherwise  => For cond.expr (body.with_expr_as_stmt)
+
+    #: Stop the loop immediately. The loop will return `False`.
+    #:
+    #:   xs_is_empty = for x in xs => break!
+    #:
+    'break', fix 0 0 $ f _ ~>
+      # TODO: make loops return False when broken
+      # TODO: dissallow `break` outside loops? Python should deal with it...
+      Result stmts:
+        list'$ asty.Break f
+
+    #: Continue on to the next iteration.
+    #:
+    #:   for x in xs => continue!
+    #:
+    'continue', fix 0 0 $ f _ ~>
+      # TODO: dissallow `continue` outside loops? Python should deal with it...
+      Result stmts:
+        list'$ asty.Continue f
+
+    #: Yield control to the caller. Enforces a generator context.
+    #:
+    #:   yield x
+    #:   yield f a b c
+    #:   yield from x  # `x` must be another generator
+    #:   yield from f a b c
+    #:
+    'yield', fix 1 inf $ f xs ~>
+      xs = list xs
+      from = head xs == 'from' and not (head xs).closed
+      Yield = if
+        not from  => bind asty.Yield     f
+        otherwise => bind asty.YieldFrom f where xs.pop 0 # TODO: test
+
+      # TODO: remove ? Python should deal with it
+      @coroutine => raise f.invalid 'cannot use `yield` in a coroutine; use `await` instead'
+      @generator = True
+
+      result = Result!
+      result += value = if
+        len xs == 1 => @load     (head xs)
+        otherwise   => @loadcall (head xs) *:(tail xs)
+      result += Yield value.expr
+
+    #: Conditional branching.
+    #:
+    #:   if
+    #:     condition1 => action1  # only one of these is executed
+    #:     condition2 => action2
+    #:     ...
+    #:
+    'if', pair_args $ f xs ~> # TODO: fix 1 inf ?
+      @loadif f xs
+
+    #: Catch exceptions, handle some, rethrow others.
+    #:
+    #:   except
+    #:     var => unsafe code
+    #:     condition1 => action1  # exception, if it occurred, was handled
+    #:     condition2 => action2
+    #:     ...
+    #:     finally => something  # will be executed even if exception is going to be rethrown
+    #:
+    'except', fix 1 inf $ pair_args $ f [(name, try), *xs] ~>
+      if xs and head (last xs) == 'finally' => @loadexcept f name try xs $ snd $ xs.pop -1
+         otherwise                          => @loadexcept f name try xs None
+
+  #: Compiler-defined functions that can be wrapped in an `async`.
+  #: Attempting to call `async` with anything else is a syntax error.
+  asyncs = set $ map (prefix !!) ['->', '~>', 'for', 'with', 'where']
+
+  #: Left infix bind overrides. Unless infix operator `R` is redefined,
+  #: these handlers process expressions of kind `x R`.
+  infixl = dict'
+    '!',     f xs ~> @loadcall (head xs) *: (tail xs)
+    ',',     apply_list asty.Tuple # TODO: starred
+    ':',     undefined 'keyword argument to what function?'
+    '~',     undefined 'this operator is prefix'
+    '@',     undefined 'this operator is prefix'
+    '@@',    undefined 'this operator is prefix'
+    '->',    default_to_none
+    '~>',    default_to_none
+    '->>',   default_to_none
+    '~>>',   default_to_none
+    'for',   default_to_none
+    'while', default_to_none
+    'where', default_to_none
+
+
+  #: Right infix bind overrides. Unless infix operator `R` is redefined,
+  #: these handlers process expressions that look like `R x`.
+  infixr = dict'
+    '~',     apply_unary_op asty.Invert
+    '-',     apply_unary_op asty.USub
+    ':',     undefined 'keyword argument to what function?'
+    '!',     undefined 'this operator is postfix'
+    ',',     undefined 'this operator is unbindable'
+    'where', default_to_none
+
+    #: Retrieve an attribute of current instance.
+    #:
+    #:   @x   <=> self.x
+    #:
+    '@', f [x] ~>
+      x :: Name or raise x.invalid 'not an attribute'
+      result = @loadname 'self'
+      result += asty.Attribute op result.expr x.value ctx:(asty.Load op)
+
+    #: Retrieve an attribute of superclass bound to current instance.
+    #:
+    #:   @@x    <=>    super!.x
+    #:
+    '@@', f [x] ~>
+      x :: Name or raise x.invalid 'not an attribute'
+      result = @loadcall' (@loadname '!super') [] []
+      result += asty.Attribute op result.expr x.value ctx:(asty.Load op)
+
+    #: Construct a function with no arguments.
+    #:
+    #:   -> x
+    #:   ->> x   <=>   async $ -> x
+    #:
+    '->',  f [body] ~> @loadfuncdef f.async None body
+    '->>', f [body] ~> @loadfuncdef True    None body
+
+    #: Construct a property.
+    #:
+    #:   ~> x
+    #:   ~>> x   <=>   async $ ~> x
+    #:
+    '~>',  f [body] ~> @loadcall'
+      @loadname 'property' # TODO: add '!property' to builtins ?
+      [@loadmethoddef f.async None body]
+      []
+    '~>>', f [body] ~> @loadcall'
+      @loadname 'property' # TODO: add '!property' to builtins ?
+      [@loadmethoddef f.async None body]
+      []

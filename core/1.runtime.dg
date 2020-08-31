@@ -93,9 +93,10 @@ BUILTINS.update $ (*: xs -> dict xs)
   # (The builtins are copied because compiled code may overshadow them.)
   '!dict',   dict
   '!super',  super
-  '!locals', locals
+  '!locals', locals # TODO filter __! varnames
   '!chain',  itertools.chain
   '!keyword_union', *: xs -> foldl1 (x y -> dict x **: y) xs
+  '!BaseException', BaseException
 
   '!subclass', attrs doc qualname name module *: bases **: kwds ->
     types.new_class name bases kwds $ ns ->
@@ -114,7 +115,7 @@ BUILTINS.update $ (*: xs -> dict xs)
       if not  path => raise ImportError $ '`{}` resolves to an empty name'.format info
          head path == ''   => parent  = 0
          head path == '..' => parent += 1
-         head path == '.'  =>
+         head path == '.'  => # TODO: is this a fall-through, or does it default to None?
          otherwise => break!
       path.pop 0
     parent, path.pop 0, path
@@ -270,6 +271,11 @@ BUILTINS.update locals! where
   #: scanl1 :: (a a -> a) (iter a) -> iter a
   #:
   scanl1 = f xs -> itertools.accumulate xs f
+
+  # TODO: stuff i want:
+  #attrgetter = operator.attrgetter
+  #itemgetter = operator.itemgetter
+  #|>> = flip map
 
   # TODO should also define foldr(1) and scanr(1). Probably.
 
